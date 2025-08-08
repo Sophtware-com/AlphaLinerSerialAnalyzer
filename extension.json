@@ -1,0 +1,13 @@
+{
+  "name": "AlphaLiner Serial Analyzer",
+  "apiVersion": "1.0.0",
+  "author": "Michael Lange",
+  "version": "0.0.1",
+  "description": "AlphaLiner communication via serial point-to-point connection with the control system. Version 1.4 (January, 11th 2007)",
+  "extensions": {
+    "AlphaLiner Serial Analyzer": {
+      "type": "HighLevelAnalyzer",
+      "entryPoint": "HighLevelAnalyzer.AlphaLinerSerialAnalyzer"
+    }
+  }
+}
