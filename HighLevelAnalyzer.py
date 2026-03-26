@@ -24,6 +24,36 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
         choices=['Yes', 'No'],
         label='Show NAK')
 
+    PACKET_LENGTHS = {
+        # PC → AlphaLiner
+        0x01: 3 + 0 + 2,   # Manual Mode
+        0x02: 3 + 0 + 2,   # Auto Mode
+        0x03: 3 + 2 + 2,   # Diagnostic Mode (D1,D2)
+        0x05: 3 + 25 + 2,  # Production Config (D1..D25)
+        0x06: 3 + 12 + 2,  # Production Order (D1..D12)
+        0x07: 3 + 0 + 2,   # Software Stop
+        0x08: 3 + 0 + 2,   # Erase Stop
+        0x10: 3 + 0 + 2,   # Request Machine Config
+        0x11: 3 + 2 + 2,   # Backup Feeder Definition
+        0x12: 3 + 3 + 2,   # Consecutive Errors
+        0x13: 3 + 2 + 2,   # Pocket/Gripper Silence
+        0x14: 3 + 2 + 2,   # Forced Reject
+        0x15: 3 + 0 + 2,   # Delete Production Data
+        0x16: 3 + 5 + 2,   # Disable Green Lights (5 bytes)
+        0x64: 3 + 2 + 2,   # Control Commands (D1,D2)
+        0x65: 3 + 7 + 2,   # Parameter Data (D1..D8)
+
+        # AlphaLiner → PC
+        0x01: 3 + 2 + 2,   # Status Message
+        0x02: 3 + 3 + 2,   # Error Message
+        0x03: 3 + 5 + 2,   # Statistic Message
+        0x04: 3 + 9 + 2,   # Copy Complete
+        0x05: 3 + 10 + 2,  # Copy Failed
+        0x06: 3 + 6 + 2,   # Machine Configuration
+        0x07: 3 + 0 + 2,   # Copy Inhibit
+        0x65: 3 + 7 + 2,   # Configuration Data Feature (same as PC→AL)
+        0x78: 3 + 6 + 2,   # Double Detector Test (D1..D6)
+    }
 
     result_types = {
         # Both
@@ -89,10 +119,21 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
     def __init__(self):
         self.buffer = []
         self.packet_start_time = None
+        self.expected_length = None
         self.controller_side = (self.com_dir == 'Controller (Transmit)')
         self.should_show_ack = (self.show_ack == 'Yes')
         self.should_show_nak = (self.show_nak == 'Yes')
 
+    def compute_bcc(payload):
+        bcc = 0
+        for b in payload:
+            bcc ^= b
+
+        # Apply reserved-character increment rule
+        if bcc in (0x00, 0x02, 0x03, 0x06, 0x15):
+            bcc = (bcc + 1) & 0xFF
+
+        return bcc
 
     def get_status_msg(self, data_bytes):
         """
@@ -444,108 +485,133 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
         return count
 
 
+    def handle_packet(self, method, seq, data_bytes, start, end):
+        if self.controller_side:
+            if method == 0x01:
+                return AnalyzerFrame('MANUAL_MODE', start, end, {'seq': seq})
+            elif method == 0x02:
+                return AnalyzerFrame('AUTO_MODE', start, end, {'seq': seq})
+            elif method == 0x05:
+                info = "Feeder: {} DoubleFeed: {} Missfeed: {} Backup: {} LowLevel: {}".format(
+                    self.format_hp_binary(data_bytes, 0),
+                    self.format_hp_binary(data_bytes, 5),
+                    self.format_hp_binary(data_bytes, 10),
+                    self.format_hp_binary(data_bytes, 15),
+                    self.format_hp_binary(data_bytes, 20)
+                )
+                return AnalyzerFrame('PROD_CONFIG', start, end, {'seq': seq, 'info': info})
+            elif method == 0x06:  # Product Order
+                info = "CopyID: {}, Inserts: {} Reserved: {}, Copies: {}".format(
+                    self.get_copy_id(data_bytes),
+                    self.format_hp_binary(data_bytes, 2),
+                    data_bytes[7] & 0x7F,
+                    self.get_count(data_bytes, 8)
+                )
+                return AnalyzerFrame('PROD_ORDER', start, end, {
+                    'seq': seq,
+                    'info': info
+                })
+            elif method == 0x07:  # Stop
+                return AnalyzerFrame('STOP', start, end, {'seq': seq})
+            elif method == 0x08:  # Erase Stop
+                return AnalyzerFrame('ERASE_STOP', start, end, {'seq': seq})
+            elif method == 0x0C:  # Consecutive Errors
+                info = "Type: {}, Feeder: {}, Count: {}".format(
+                    self.get_control_type(data_bytes[0] & 0x7F),
+                    (lambda v: ("ALL" if v == 99 else ("J" if v == 0 else v))) (data_bytes[1] & 0x7F),
+                    data_bytes[2] & 0x7F
+                )
+                return AnalyzerFrame('CONSECUTIVE_ERRORS', start, end, {
+                    'seq': seq,
+                    'info': info
+                })
+        else:
+            if method == 0x01:
+                return AnalyzerFrame('STATUS_MSG', start, end, {'seq': seq, 'info': self.get_status_msg(data_bytes)})
+            elif method == 0x02:
+                return AnalyzerFrame('ERROR_MSG', start, end, {'seq': seq, 'info': self.get_error_msg(data_bytes)})
+            elif method == 0x03:  # Statistic Message
+                return AnalyzerFrame('STATISTIC_MSG', start, end, {'seq': seq, 'info': self.get_statistic_msg(data_bytes)})
+            elif method == 0x04:  # Copy Complete
+                return AnalyzerFrame('COPY_COMPLETE', start, end, {'seq': seq, 'info': self.get_copy_complete_msg(data_bytes)})
+            elif method == 0x05:  # Copy Failed
+                info = "{}, Inserts: {}".format(self.get_statistic_msg(data_bytes), self.format_hp_binary(data_bytes, 5))
+                return AnalyzerFrame('COPY_FAILED', start, end, {'seq': seq, 'info': info})
+
+        return AnalyzerFrame('UNKNOWN', start, end, {'info': f'Method {method} not implemented'})
+
+
     def decode(self, frame: AnalyzerFrame):
-        
-        if frame.type == "data" and "data" in frame.data.keys():
+
+        if frame.type == "data" and "data" in frame.data:
             byte = frame.data["data"][0]
-            char = chr(byte)
 
         start_time = frame.start_time
         end_time = frame.end_time
 
-        # Handle ACK as standalone frame
+        # ACK / NAK handling
         if byte == ACK:
-            if self.should_show_ack:
-                return AnalyzerFrame('ACK', start_time, end_time, None)
-            else:
-                return None
+            return AnalyzerFrame('ACK', start_time, end_time, None) if self.should_show_ack else None
 
-        # Handle NAK as standalone frame
         if byte == NAK:
-            if self.should_show_nak:
-                return AnalyzerFrame('NAK', start_time, end_time, None)
-            else:
-                return None
+            return AnalyzerFrame('NAK', start_time, end_time, None) if self.should_show_nak else None
 
         # Start of packet
         if byte == STX:
-            self.buffer = []
+            self.buffer = [byte]
             self.packet_start_time = start_time
+            self.expected_length = None
             return None
 
-        # End of packet
-        if byte == ETX:
-            if self.buffer and self.packet_start_time:
-                if len(self.buffer) >= 2:
-                    seq_raw = self.buffer[0]
-                    method_raw = self.buffer[1]
-                    data_bytes = self.buffer[2:]
-
-                    seq = seq_raw & 0x7F
-                    method = method_raw & 0x7F
-
-                    if self.controller_side:
-                        if method == 0x01:  # Manual Mode
-                            return AnalyzerFrame('MANUAL_MODE', self.packet_start_time, end_time, {'seq': seq})
-                        elif method == 0x02:  # Auto Mode
-                            return AnalyzerFrame('AUTO_MODE', self.packet_start_time, end_time, {'seq': seq})
-                        elif method == 0x05:  # Product Config
-                            info = "Feeder: {} DoubleFeed: {} Missfeed: {} Backup: {} LowLevel: {}".format(
-                                self.format_hp_binary(data_bytes, 0),
-                                self.format_hp_binary(data_bytes, 5),
-                                self.format_hp_binary(data_bytes, 10),
-                                self.format_hp_binary(data_bytes, 15),
-                                self.format_hp_binary(data_bytes, 20)
-                            )
-                            return AnalyzerFrame('PROD_CONFIG', self.packet_start_time, end_time, {
-                                'seq': seq,
-                                'info': info
-                            })
-                        elif method == 0x06:  # Product Order
-                            info = "CopyID: {}, Inserts: {} Reserved: {}, Copies: {}".format(
-                                self.get_copy_id(data_bytes),
-                                self.format_hp_binary(data_bytes, 2),
-                                data_bytes[7] & 0x7F,
-                                self.get_count(data_bytes, 8)
-                            )
-                            return AnalyzerFrame('PROD_ORDER', self.packet_start_time, end_time, {
-                                'seq': seq,
-                                'info': info
-                            })
-                        elif method == 0x07:  # Stop
-                            return AnalyzerFrame('STOP', self.packet_start_time, end_time, {'seq': seq})
-                        elif method == 0x08:  # Erase Stop
-                            return AnalyzerFrame('ERASE_STOP', self.packet_start_time, end_time, {'seq': seq})
-                        elif method == 0x0C:  # Consecutive Errors
-                            info = "Type: {}, Feeder: {}, Count: {}".format(
-                                self.get_control_type(data_bytes[0] & 0x7F),
-                                (lambda v: ("ALL" if v == 99 else ("J" if v == 0 else v))) (data_bytes[1] & 0x7F),
-                                data_bytes[2] & 0x7F
-                            )
-                            return AnalyzerFrame('CONSECUTIVE_ERRORS', self.packet_start_time, end_time, {
-                                'seq': seq,
-                                'info': info
-                            })
-                    else:  # AlphaLiner side
-                        if method == 0x01:  # Manual Mode
-                            return AnalyzerFrame('STATUS_MSG', self.packet_start_time, end_time, {'seq': seq, 'info': self.get_status_msg(data_bytes)})
-                        elif method == 0x02:  # Auto Mode
-                            return AnalyzerFrame('ERROR_MSG', self.packet_start_time, end_time, {'seq': seq, 'info': self.get_error_msg(data_bytes)})
-                        elif method == 0x03:  # Statistic Message
-                            return AnalyzerFrame('STATISTIC_MSG', self.packet_start_time, end_time, {'seq': seq, 'info': self.get_statistic_msg(data_bytes)})
-                        elif method == 0x04:  # Copy Complete
-                            return AnalyzerFrame('COPY_COMPLETE', self.packet_start_time, end_time, {'seq': seq, 'info': self.get_copy_complete_msg(data_bytes)})
-                        elif method == 0x05:  # Copy Failed
-                            info = "{}, Inserts: {}".format(self.get_statistic_msg(data_bytes), self.format_hp_binary(data_bytes, 5))
-                            return AnalyzerFrame('COPY_FAILED', self.packet_start_time, end_time, {'seq': seq, 'info': info})
-
-                # ETX without active packet
-                return AnalyzerFrame('UNKNOWN', start_time, end_time, {
-                    'info': 'Try switching the Communication Direction.'
-                })
-
-        # Inside packet
+        # If inside a packet, accumulate bytes
         if self.packet_start_time:
             self.buffer.append(byte)
 
+            # Once we have STX + C1 + C2, determine expected length
+            if len(self.buffer) == 3:
+                method_raw = self.buffer[2]
+                method = method_raw & 0x7F
+                self.expected_length = PACKET_LENGTHS.get(method)
+
+            # If we know the expected length and have enough bytes, finalize
+            if self.expected_length and len(self.buffer) == self.expected_length:
+
+                # Validate ETX
+                if self.buffer[-1] != ETX:
+                    info = f"Invalid ETX: expected 0x03, got {hex(self.buffer[-1])}"
+                    self._reset_state()
+                    return AnalyzerFrame('UNKNOWN', start_time, end_time, {'info': info})
+
+                # Validate BCC
+                bcc_received = self.buffer[-2]
+                payload = self.buffer[1:-2]  # C1, C2, D1..Dn
+                bcc_expected = compute_bcc(payload)
+
+                if bcc_received != bcc_expected:
+                    info = f"BCC mismatch: expected {hex(bcc_expected)}, got {hex(bcc_received)}"
+                    self._reset_state()
+                    return AnalyzerFrame('UNKNOWN', start_time, end_time, {'info': info})
+
+                # Extract fields
+                seq_raw = self.buffer[1]
+                method_raw = self.buffer[2]
+                data_bytes = self.buffer[3:-2]
+
+                seq = seq_raw & 0x7F
+                method = method_raw & 0x7F
+
+                frame_start = self.packet_start_time
+
+                # Reset before dispatch
+                self._reset_state()
+
+                # Dispatch to existing logic
+                return self.handle_packet(method, seq, data_bytes, frame_start, end_time)
+
         return None
+
+
+    def _reset_state(self):
+        self.buffer = []
+        self.packet_start_time = None
+        self.expected_length = None
