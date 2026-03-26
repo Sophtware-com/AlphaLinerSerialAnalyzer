@@ -11,7 +11,7 @@ An AlphaLiner is an industrial machine used in printing and packaging lines, typ
 - The original PDF protocol documentation converted to markdown is included below (not perfect).
 - This analyzer can be used to analyze data streams coming from or going to the AlphaLiner
 - Not all protocol methods have been implemented (only the critical ones for collating)
-- Output format <METHOD_NAME> <PACKET_SEQUENCE>𝑛 (<DETAILS>)
+- Output format ```METHOD_NAME PACKET_SEQUENCE𝑛 (DETAILS)```
 - Both ACK and NAK can be hidden so they don't show in the display or export with table data.
 
 # Protocol PC to AlphaLiner
