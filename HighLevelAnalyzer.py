@@ -9,7 +9,6 @@ ETX = 0x03
 ACK = 0x06
 NAK = 0x15
 
-
 # High level analyzers must subclass the HighLevelAnalyzer class.
 class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
 
@@ -123,17 +122,6 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
         self.controller_side = (self.com_dir == 'Controller (Transmit)')
         self.should_show_ack = (self.show_ack == 'Yes')
         self.should_show_nak = (self.show_nak == 'Yes')
-
-    def compute_bcc(payload):
-        bcc = 0
-        for b in payload:
-            bcc ^= b
-
-        # Apply reserved-character increment rule
-        if bcc in (0x00, 0x02, 0x03, 0x06, 0x15):
-            bcc = (bcc + 1) & 0xFF
-
-        return bcc
 
     def get_status_msg(self, data_bytes):
         """
@@ -541,6 +529,18 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
         return AnalyzerFrame('UNKNOWN', start, end, {'info': f'Method {method} not implemented'})
 
 
+    def compute_bcc(payload):
+        bcc = 0
+        for b in payload:
+            bcc ^= b
+
+        # Apply reserved-character increment rule
+        if bcc in (0x00, 0x02, 0x03, 0x06, 0x15):
+            bcc = (bcc + 1) & 0xFF
+
+        return bcc
+
+
     def decode(self, frame: AnalyzerFrame):
 
         if frame.type == "data" and "data" in frame.data:
@@ -571,7 +571,7 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
             if len(self.buffer) == 3:
                 method_raw = self.buffer[2]
                 method = method_raw & 0x7F
-                self.expected_length = PACKET_LENGTHS.get(method)
+                self.expected_length = self.PACKET_LENGTHS.get(method)
 
             # If we know the expected length and have enough bytes, finalize
             if self.expected_length and len(self.buffer) == self.expected_length:
@@ -585,7 +585,7 @@ class AlphaLinerSerialAnalyzer(HighLevelAnalyzer):
                 # Validate BCC
                 bcc_received = self.buffer[-2]
                 payload = self.buffer[1:-2]  # C1, C2, D1..Dn
-                bcc_expected = compute_bcc(payload)
+                bcc_expected = self.compute_bcc(payload)
 
                 if bcc_received != bcc_expected:
                     info = f"BCC mismatch: expected {hex(bcc_expected)}, got {hex(bcc_received)}"
